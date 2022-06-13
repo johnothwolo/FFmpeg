@@ -104,6 +104,11 @@ static struct{
 
     CFStringRef kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder;
     CFStringRef kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder;
+    
+    // eGPU support
+    CFStringRef kVTCompressionPropertyKey_UsingGPURegistryID
+    CFStringRef kVTVideoEncoderSpecification_PreferredEncoderGPURegistryID;
+    CFStringRef kVTVideoEncoderSpecification_RequiredEncoderGPURegistryID;
 
     getParameterSetAtIndex CMVideoFormatDescriptionGetHEVCParameterSetAtIndex;
 } compat_keys;
@@ -169,6 +174,11 @@ static void loadVTEncSymbols(){
             "EnableHardwareAcceleratedVideoEncoder");
     GET_SYM(kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
             "RequireHardwareAcceleratedVideoEncoder");
+    
+    // eGPU support
+    GET_SYM(kVTCompressionPropertyKey_UsingGPURegistryID, "UsingMetalRegistryID");
+    GET_SYM(kVTVideoEncoderSpecification_PreferredEncoderGPURegistryID, "PreferredEncoderGPURegistryID");
+    GET_SYM(kVTVideoEncoderSpecification_RequiredEncoderGPURegistryID,"RequiredEncoderGPURegistryID");
 }
 
 typedef enum VT_H264Profile {
@@ -231,6 +241,7 @@ typedef struct VTEncContext {
     int64_t dts_delta;
 
     int64_t profile;
+    bool gpuid_is_set;
     int level;
     int entropy;
     int realtime;
@@ -1422,6 +1433,54 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
     return 0;
 }
 
+static bool
+gpuid_is_valid(unsigned long long id)
+{
+    // Get dictionary of all the IOAccel Devices
+    CFMutableDictionaryRef matchDict = IOServiceMatching("IOAccelerator");
+
+    // Create an iterator
+    io_iterator_t iterator;
+    if (IOServiceGetMatchingServices(kIOMasterPortDefault, matchDict, &iterator) == kIOReturnSuccess)
+    {
+        // Iterator for devices found
+        io_registry_entry_t regEntry;
+
+        while ((regEntry = IOIteratorNext(iterator))) {
+            unsigned long long entryID; // graphics card IOACcel registryID property
+            // Put this services object into a dictionary object.
+            CFMutableDictionaryRef serviceDictionary;
+            if (IORegistryEntryCreateCFProperties(regEntry,
+                                                  &serviceDictionary,
+                                                  kCFAllocatorDefault,
+                                                  kNilOptions) != kIOReturnSuccess)
+            {
+                goto release_entry_ioobject;
+            }
+            
+            // get registryID
+            IORegistryEntryGetRegistryEntryID(regEntry, &entryID);
+            // compare
+            if (entryID == id){
+                CFRelease(serviceDictionary);
+                IOObjectRelease(regEntry);
+                IOObjectRelease(iterator);
+                return true;
+            }
+            
+            
+            // Release the dictionary
+            CFRelease(serviceDictionary);
+        release_entry_ioobject:
+            // Release the entry object
+            IOObjectRelease(regEntry);
+        }
+        // Release the iterator
+        IOObjectRelease(iterator);
+    }
+    return false;
+}
+
 static int vtenc_configure_encoder(AVCodecContext *avctx)
 {
     CFMutableDictionaryRef enc_info;
@@ -1431,6 +1490,7 @@ static int vtenc_configure_encoder(AVCodecContext *avctx)
     CFStringRef            profile_level = NULL;
     CFNumberRef            gamma_level = NULL;
     int                    status;
+    char                  *gpuID = NULL;
 
     codec_type = get_cm_codec_type(avctx, vtctx->profile, vtctx->alpha_quality);
     if (!codec_type) {
@@ -1483,6 +1543,24 @@ static int vtenc_configure_encoder(AVCodecContext *avctx)
     if (!enc_info) return AVERROR(ENOMEM);
 
 #if !TARGET_OS_IPHONE
+    // if we want to use a specific GPU, then we set the property, then enable HW acceleration by default.
+    // we choose PreferredEncoderGPURegistryID so that Videotoolbox can fallback if there's any problem.
+    if ((gpuID = getenv("FFMPEG_GPUID")) != NULL) {
+        unsigned long long gpuid_ll = atoll(gpuID);
+        // verify gpuID
+        if (gpuid_is_valid(gpuid_ll)){
+            CFNumberRef cfGpuID = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongLongType, &gpuid_long);
+            CFDictionarySetValue(enc_info,
+                                 compat_keys.kVTVideoEncoderSpecification_PreferredEncoderGPURegistryID,
+                                 cfGpuID);
+            vtctx->gpuid_is_set = true;
+            vtctx->require_sw = false;
+            vtctx->allow_sw = true; // we won't 'require' (does it force HW only?) HW accel in case it fails.
+            // I'm assuming this flag works like PreferredEncoderGPURegistryID.
+        }
+    }
+    
+    
     if(vtctx->require_sw) {
         CFDictionarySetValue(enc_info,
                              compat_keys.kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
@@ -1555,6 +1633,7 @@ static av_cold int vtenc_init(AVCodecContext *avctx)
     pthread_mutex_init(&vtctx->lock, NULL);
     pthread_cond_init(&vtctx->cv_sample_sent, NULL);
 
+    vtctx->gpuid_is_set = false;
     vtctx->session = NULL;
     status = vtenc_configure_encoder(avctx);
     if (status) return status;
