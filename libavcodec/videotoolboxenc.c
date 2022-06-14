@@ -106,7 +106,7 @@ static struct{
     CFStringRef kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder;
     
     // eGPU support
-    CFStringRef kVTCompressionPropertyKey_UsingGPURegistryID
+    CFStringRef kVTCompressionPropertyKey_UsingGPURegistryID;
     CFStringRef kVTVideoEncoderSpecification_PreferredEncoderGPURegistryID;
     CFStringRef kVTVideoEncoderSpecification_RequiredEncoderGPURegistryID;
 
@@ -1100,6 +1100,7 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
     CFNumberRef  quality_num;
     CFNumberRef  bytes_per_second;
     CFNumberRef  one_second;
+    CFNumberRef  gpuid_for_encoder; // if we successfully query the gpuid then gpu is being used for encoding
     CFArrayRef   data_rate_limits;
     int64_t      bytes_per_second_value = 0;
     int64_t      one_second_value = 0;
@@ -1126,6 +1127,23 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
 #endif
 
         return AVERROR_EXTERNAL;
+    }
+    
+    if (vtctx->gpuid_is_set) {
+        unsigned long long gpuid_ll;
+         // sets gpuid_for_encoder to null if gpu isn't used
+        status = VTSessionCopyProperty(vtctx->session,
+                                       kVTCompressionPropertyKey_UsingGPURegistryID,
+                                       kCFAllocatorMalloc, &gpuid_for_encoder);
+        
+        // TODO: maybe double check value with a cached gpuid
+        if (gpuid_for_encoder != NULL){
+            CFNumberGetValue(gpuid_for_encoder, kCFNumberLongLongType, &gpuid_ll);
+            av_log(avctx, AV_LOG_INFO, "Enabled GPU encoder with GPUID: 0x%llx\n", gpuid_ll);
+            raise(SIGTRAP);
+        } else {
+            av_log(avctx, AV_LOG_WARNING, "Error enabling the GPU encoder. VT is probably falling back to an internal encoder\n");
+        }
     }
 
     if (avctx->flags & AV_CODEC_FLAG_QSCALE && !vtenc_qscale_enabled()) {
@@ -1549,14 +1567,13 @@ static int vtenc_configure_encoder(AVCodecContext *avctx)
         unsigned long long gpuid_ll = atoll(gpuID);
         // verify gpuID
         if (gpuid_is_valid(gpuid_ll)){
-            CFNumberRef cfGpuID = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongLongType, &gpuid_long);
+            CFNumberRef cfGpuID = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongLongType, &gpuid_ll);
             CFDictionarySetValue(enc_info,
                                  compat_keys.kVTVideoEncoderSpecification_PreferredEncoderGPURegistryID,
                                  cfGpuID);
             vtctx->gpuid_is_set = true;
             vtctx->require_sw = false;
-            vtctx->allow_sw = true; // we won't 'require' (does it force HW only?) HW accel in case it fails.
-            // I'm assuming this flag works like PreferredEncoderGPURegistryID.
+            vtctx->allow_sw = false;
         }
     }
     
