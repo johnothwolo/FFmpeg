@@ -44,3 +44,11 @@ GPL. Please refer to the LICENSE file for detailed information.
 Patches should be submitted to the ffmpeg-devel mailing list using
 `git format-patch` or `git send-email`. Github pull requests should be
 avoided because they are not part of our review process and will be ignored.
+
+## FORCING EGPU HW ENCODING
+
+Set the envornment variable `FFMPEG_GPUID` to your gpu's registry ID. 
+To find your gpu's registry ID, run the tool `ffgpulist`.
+According to this [source](https://egpu.io/forums/pro-applications/insights-into-macos-video-editing-performance/) macOS always falls back to the T2 chip for HEVC encoding. 
+
+
