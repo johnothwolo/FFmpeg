@@ -88,8 +88,7 @@ int main(int argc, const char * argv[]) {
         abort();
     }
     if (strncmp(utsname.sysname, "Darwin", sizeof("Darwin") - 1) != 0)
-        return displayGraphicsInfo();
+        fprintf(stderr, "This command is only supported on macOS");
     
-    fprintf(stderr, "This command is only supported on macOS");
-    return 0;
+    return displayGraphicsInfo();
 }
